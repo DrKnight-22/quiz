@@ -1,195 +1,280 @@
-import { useState, useEffect, useContext } from 'react';
+import React, { useState, useEffect } from 'react';
+import { collection, query, where, getDocs } from 'firebase/firestore';
 import { Link } from 'react-router-dom';
-import Layout from '../../components/Layout';
-import { AuthContext } from '../../App';
-import { db } from '../../utils/localStorageDB';
-import { BookOpen, Clock, CheckCircle2, AlertCircle } from 'lucide-react';
+import { db } from '../../firebase/config';
+import { useAuth } from '../../context/AuthContext';
+import DashboardLayout from '../../components/layout/DashboardLayout';
+import { BookOpen, Award, Clock, CheckCircle, AlertCircle } from 'lucide-react';
+import { Chart as ChartJS, ArcElement, Tooltip, Legend, CategoryScale, LinearScale, PointElement, LineElement, Title } from 'chart.js';
+import { Line } from 'react-chartjs-2';
+
+// Register Chart.js components
+ChartJS.register(ArcElement, CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend);
+
+const StatCard = ({ title, value, icon, bgColor, linkTo }) => {
+  const Card = linkTo ? Link : 'div';
+  
+  return (
+    <Card 
+      to={linkTo}
+      className={`${bgColor} rounded-lg shadow-soft p-6 flex items-center transition-transform duration-200 hover:scale-105`}
+    >
+      <div className="rounded-full bg-white bg-opacity-30 p-3 mr-4">
+        {icon}
+      </div>
+      <div>
+        <h3 className="text-white text-lg font-semibold">{title}</h3>
+        <p className="text-white text-2xl font-bold">{value}</p>
+      </div>
+    </Card>
+  );
+};
 
 const StudentDashboard = () => {
-  const { user } = useContext(AuthContext);
-  const [loading, setLoading] = useState(true);
-  const [recentQuizzes, setRecentQuizzes] = useState([]);
-  const [upcomingQuizzes, setUpcomingQuizzes] = useState([]);
+  const { currentUser } = useAuth();
   const [stats, setStats] = useState({
+    enrolledCourses: 0,
     completedQuizzes: 0,
-    averageScore: 0,
-    totalCourses: 0
+    pendingQuizzes: 0,
+    averageScore: 0
   });
-  
+  const [upcomingQuizzes, setUpcomingQuizzes] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [performanceData, setPerformanceData] = useState({ labels: [], datasets: [] });
+  const [userName, setUserName] = useState('');
+
   useEffect(() => {
     const fetchDashboardData = async () => {
-      if (!user) return;
+      if (!currentUser) return;
       
       try {
-        setLoading(true);
+        // Get user details
+        const userQuery = query(collection(db, 'users'), where('uid', '==', currentUser.uid));
+        const userSnapshot = await getDocs(userQuery);
         
-        // Fetch completed quizzes
-        const completedData = db.filter('quiz_results', { student_id: user.id })
-          .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
-          .slice(0, 5)
-          .map(result => ({
-            ...result,
-            quizzes: db.getById('quizzes', result.quiz_id)
-          }));
+        if (!userSnapshot.empty) {
+          const userData = userSnapshot.docs[0].data();
+          setUserName(userData.name || 'Student');
+        }
         
-        // Fetch upcoming quizzes (not completed by this student)
-        const completedQuizIds = completedData.map(item => item.quiz_id);
-        const upcomingData = db.get('quizzes')
-          .filter(q => q.is_active && !completedQuizIds.includes(q.id))
-          .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
-          .slice(0, 5);
+        // Get student enrollments
+        const enrollmentsQuery = query(
+          collection(db, 'enrollments'),
+          where('studentId', '==', currentUser.uid)
+        );
+        const enrollmentsSnapshot = await getDocs(enrollmentsQuery);
         
-        // Fetch statistics
-        const statsData = db.filter('quiz_results', { student_id: user.id });
+        // Filter approved enrollments
+        const approvedEnrollments = enrollmentsSnapshot.docs
+          .map(doc => ({ id: doc.id, ...doc.data() }))
+          .filter(enrollment => enrollment.status === 'approved');
         
-        // Fetch total courses
-        const coursesCount = db.get('courses').length;
+        // Get enrolled course IDs
+        const courseIds = approvedEnrollments.map(enrollment => enrollment.courseId);
         
-        // Set states
-        setRecentQuizzes(completedData);
-        setUpcomingQuizzes(upcomingData);
+        // Initialize quizzes arrays
+        let completedQuizzes = [];
+        let pendingQuizzes = [];
+        let totalScore = 0;
         
-        const totalQuizzes = statsData.length;
-        const totalScore = statsData.reduce((sum, item) => sum + (item.score || 0), 0);
-        const avgScore = totalQuizzes > 0 ? Math.round(totalScore / totalQuizzes) : 0;
+        // Get quiz results for the student
+        const quizResultsQuery = query(
+          collection(db, 'quizResults'),
+          where('studentId', '==', currentUser.uid)
+        );
+        const quizResultsSnapshot = await getDocs(quizResultsQuery);
         
+        if (quizResultsSnapshot.size > 0) {
+          const quizResults = quizResultsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+          completedQuizzes = quizResults;
+          totalScore = quizResults.reduce((sum, result) => sum + (result.score || 0), 0);
+        }
+        
+        // Get available quizzes for enrolled courses
+        if (courseIds.length > 0) {
+          // Due to Firestore limitations on "in" queries, we might need to chunk this if there are many courses
+          const availableQuizzesQuery = query(
+            collection(db, 'quizzes'),
+            where('courseId', 'in', courseIds.slice(0, 10)) // Firestore limits "in" queries to 10 values
+          );
+          const availableQuizzesSnapshot = await getDocs(availableQuizzesQuery);
+          
+          if (availableQuizzesSnapshot.size > 0) {
+            const allAvailableQuizzes = availableQuizzesSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+            
+            // Filter out quizzes that the student has already completed
+            const completedQuizIds = completedQuizzes.map(quiz => quiz.quizId);
+            pendingQuizzes = allAvailableQuizzes.filter(quiz => !completedQuizIds.includes(quiz.id));
+            
+            // Sort pending quizzes by due date
+            pendingQuizzes.sort((a, b) => {
+              if (a.dueDate && b.dueDate) {
+                return new Date(a.dueDate) - new Date(b.dueDate);
+              }
+              return 0;
+            });
+            
+            // Set upcoming quizzes (only show first 5)
+            setUpcomingQuizzes(pendingQuizzes.slice(0, 5));
+          }
+        }
+        
+        // Calculate average score
+        const averageScore = completedQuizzes.length > 0 ? 
+          Math.round(totalScore / completedQuizzes.length) : 0;
+        
+        // Set stats
         setStats({
-          completedQuizzes: totalQuizzes,
-          averageScore: avgScore,
-          totalCourses: coursesCount
+          enrolledCourses: courseIds.length,
+          completedQuizzes: completedQuizzes.length,
+          pendingQuizzes: pendingQuizzes.length,
+          averageScore
         });
         
+        // Prepare performance data for chart
+        if (completedQuizzes.length > 0) {
+          // Sort by date
+          completedQuizzes.sort((a, b) => new Date(a.submittedAt) - new Date(b.submittedAt));
+          
+          // Only show last 10 quiz results
+          const recentQuizzes = completedQuizzes.slice(-10);
+          
+          setPerformanceData({
+            labels: recentQuizzes.map(quiz => quiz.quizTitle || 'Quiz'),
+            datasets: [{
+              label: 'Quiz Score (%)',
+              data: recentQuizzes.map(quiz => quiz.score || 0),
+              borderColor: '#2563EB',
+              backgroundColor: 'rgba(37, 99, 235, 0.1)',
+              tension: 0.3,
+              fill: true,
+            }]
+          });
+        }
+        
+        setLoading(false);
       } catch (error) {
         console.error('Error fetching dashboard data:', error);
-      } finally {
         setLoading(false);
       }
     };
-    
+
     fetchDashboardData();
-  }, [user]);
-  
-  if (loading) {
-    return (
-      <Layout title="Student Dashboard" role="student">
-        <div className="flex items-center justify-center p-12">
-          <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-green-700"></div>
-        </div>
-      </Layout>
-    );
-  }
-  
+  }, [currentUser]);
+
   return (
-    <Layout title="Student Dashboard" role="student">
-      {/* Stats Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-        <div className="bg-white p-4 rounded-lg shadow-sm flex items-center">
-          <div className="w-12 h-12 bg-green-100 rounded-full flex items-center justify-center mr-4">
-            <CheckCircle2 size={24} className="text-green-600" />
-          </div>
-          <div>
-            <p className="text-sm text-gray-500">Completed Quizzes</p>
-            <p className="text-2xl font-semibold">{stats.completedQuizzes}</p>
-          </div>
+    <DashboardLayout title="Student Dashboard">
+      <div className="animate-fade-in">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between mb-6">
+          <h2 className="text-xl font-semibold text-gray-700">Welcome, {userName}</h2>
+          <p className="text-gray-500 mt-1 sm:mt-0">
+            Current Average: <span className="font-semibold text-primary-600">{stats.averageScore}%</span>
+          </p>
         </div>
         
-        <div className="bg-white p-4 rounded-lg shadow-sm flex items-center">
-          <div className="w-12 h-12 bg-blue-100 rounded-full flex items-center justify-center mr-4">
-            <AlertCircle size={24} className="text-blue-600" />
+        {loading ? (
+          <div className="flex justify-center items-center h-64">
+            <div className="h-8 w-8 border-4 border-primary-500 border-t-transparent rounded-full animate-spin"></div>
           </div>
-          <div>
-            <p className="text-sm text-gray-500">Average Score</p>
-            <p className="text-2xl font-semibold">{stats.averageScore}%</p>
-          </div>
-        </div>
-        
-        <div className="bg-white p-4 rounded-lg shadow-sm flex items-center">
-          <div className="w-12 h-12 bg-purple-100 rounded-full flex items-center justify-center mr-4">
-            <BookOpen size={24} className="text-purple-600" />
-          </div>
-          <div>
-            <p className="text-sm text-gray-500">Available Courses</p>
-            <p className="text-2xl font-semibold">{stats.totalCourses}</p>
-          </div>
-        </div>
-      </div>
-      
-      {/* Recent and Upcoming Quizzes */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        {/* Recent Quizzes */}
-        <div className="bg-white p-6 rounded-lg shadow-sm">
-          <div className="flex justify-between items-center mb-4">
-            <h2 className="text-lg font-semibold">Recent Quizzes</h2>
-            <Link to="/student/courses" className="text-sm text-[#6E8B55] hover:underline">
-              View All
-            </Link>
-          </div>
-          
-          {recentQuizzes.length > 0 ? (
-            <div className="space-y-3">
-              {recentQuizzes.map((item) => (
-                <Link 
-                  key={item.id} 
-                  to={`/student/results/${item.id}`}
-                  className="block p-3 rounded-lg border border-gray-100 hover:bg-gray-50 transition-colors"
-                >
-                  <div className="flex justify-between items-center">
-                    <div>
-                      <h3 className="font-medium">{item.quizzes?.title || 'Quiz'}</h3>
-                      <p className="text-sm text-gray-500">
-                        Score: <span className="font-medium">{item.score}%</span>
-                      </p>
-                    </div>
-                    <div className={`px-2 py-1 rounded text-xs ${
-                      item.score >= 70 ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
-                    }`}>
-                      {item.score >= 70 ? 'Passed' : 'Failed'}
-                    </div>
-                  </div>
-                </Link>
-              ))}
+        ) : (
+          <>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+              <StatCard 
+                title="Enrolled Courses" 
+                value={stats.enrolledCourses} 
+                icon={<BookOpen size={24} className="text-white" />} 
+                bgColor="bg-primary-600"
+                linkTo="/student/courses" 
+              />
+              <StatCard 
+                title="Completed Quizzes" 
+                value={stats.completedQuizzes} 
+                icon={<CheckCircle size={24} className="text-white" />} 
+                bgColor="bg-success-600"
+                linkTo="/student/results" 
+              />
+              <StatCard 
+                title="Pending Quizzes" 
+                value={stats.pendingQuizzes} 
+                icon={<Clock size={24} className="text-white" />} 
+                bgColor="bg-warning-600" 
+              />
+              <StatCard 
+                title="Average Score" 
+                value={`${stats.averageScore}%`} 
+                icon={<Award size={24} className="text-white" />} 
+                bgColor="bg-accent-600" 
+              />
             </div>
-          ) : (
-            <p className="text-gray-500 py-4 text-center">You haven't completed any quizzes yet.</p>
-          )}
-        </div>
-        
-        {/* Upcoming Quizzes */}
-        <div className="bg-white p-6 rounded-lg shadow-sm">
-          <div className="flex justify-between items-center mb-4">
-            <h2 className="text-lg font-semibold">Available Quizzes</h2>
-            <Link to="/student/courses" className="text-sm text-[#6E8B55] hover:underline">
-              View All
-            </Link>
-          </div>
-          
-          {upcomingQuizzes.length > 0 ? (
-            <div className="space-y-3">
-              {upcomingQuizzes.map((quiz) => (
-                <Link 
-                  key={quiz.id} 
-                  to={`/student/quiz/${quiz.id}`}
-                  className="block p-3 rounded-lg border border-gray-100 hover:bg-gray-50 transition-colors"
-                >
-                  <div className="flex justify-between items-center">
-                    <div>
-                      <h3 className="font-medium">{quiz.title}</h3>
-                      <p className="text-sm text-gray-500">{quiz.description || 'No description'}</p>
+            
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              {/* Performance Chart */}
+              <div className="bg-white p-6 rounded-lg shadow-soft lg:col-span-2">
+                <h3 className="text-lg font-semibold text-gray-700 mb-4">Performance History</h3>
+                <div className="h-64">
+                  {performanceData.labels.length > 0 ? (
+                    <Line 
+                      data={performanceData} 
+                      options={{ 
+                        maintainAspectRatio: false,
+                        scales: {
+                          y: {
+                            beginAtZero: true,
+                            max: 100,
+                            title: {
+                              display: true,
+                              text: 'Score (%)'
+                            }
+                          }
+                        }
+                      }} 
+                    />
+                  ) : (
+                    <div className="flex items-center justify-center h-full text-gray-500">
+                      No quiz history available yet.
                     </div>
-                    <div className="flex items-center text-[#6E8B55]">
-                      <Clock size={16} className="mr-1" />
-                      <span className="text-sm">Take Quiz</span>
-                    </div>
+                  )}
+                </div>
+              </div>
+              
+              {/* Upcoming Quizzes */}
+              <div className="bg-white p-6 rounded-lg shadow-soft">
+                <h3 className="text-lg font-semibold text-gray-700 mb-4">Upcoming Quizzes</h3>
+                {upcomingQuizzes.length > 0 ? (
+                  <ul className="divide-y divide-gray-200">
+                    {upcomingQuizzes.map((quiz) => (
+                      <li key={quiz.id} className="py-3">
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <p className="text-sm font-medium text-gray-900">{quiz.title || 'Untitled Quiz'}</p>
+                            <p className="text-sm text-gray-500">{quiz.courseName || 'Unknown Course'}</p>
+                            {quiz.dueDate && (
+                              <p className="text-xs text-gray-500">
+                                Due: {new Date(quiz.dueDate).toLocaleDateString()}
+                              </p>
+                            )}
+                          </div>
+                          <Link 
+                            to={`/student/take-quiz/${quiz.id}`}
+                            className="inline-flex items-center px-2.5 py-1.5 border border-transparent text-xs font-medium rounded text-white bg-primary-600 hover:bg-primary-700"
+                          >
+                            Take Quiz
+                          </Link>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <div className="py-4 text-center text-gray-500">
+                    No upcoming quizzes.
                   </div>
-                </Link>
-              ))}
+                )}
+              </div>
             </div>
-          ) : (
-            <p className="text-gray-500 py-4 text-center">No quizzes available at the moment.</p>
-          )}
-        </div>
+          </>
+        )}
       </div>
-    </Layout>
+    </DashboardLayout>
   );
 };
 

@@ -1,327 +1,287 @@
-import { useState, useContext } from 'react';
-import { useNavigate } from 'react-router-dom';
-import Layout from '../../components/Layout';
-import { AuthContext } from '../../App';
-import { db } from '../../utils/localStorageDB';
-import { Save, Plus, Trash2 } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { useForm } from 'react-hook-form';
+import { collection, addDoc, getDocs, query, where } from 'firebase/firestore';
+import { toast } from 'react-hot-toast';
+import { db } from '../../firebase/config';
+import { useAuth } from '../../context/AuthContext';
+import DashboardLayout from '../../components/layout/DashboardLayout';
+import Button from '../../components/ui/Button';
+import Input from '../../components/ui/Input';
+import { Plus, Trash2, FilePlus, Save } from 'lucide-react';
 
 const CreateQuiz = () => {
-  const { user } = useContext(AuthContext);
-  const navigate = useNavigate();
-  
-  const [formData, setFormData] = useState({
-    title: '',
-    description: '',
-    timeLimit: 30,
-    passingScore: 70,
-    questions: [
-      {
-        questionText: '',
-        questionType: 'multiple_choice',
-        points: 1,
-        options: [
-          { optionText: '', isCorrect: false },
-          { optionText: '', isCorrect: false },
-          { optionText: '', isCorrect: false },
-          { optionText: '', isCorrect: false }
-        ]
-      }
-    ]
-  });
-  
+  const { register, handleSubmit, reset, formState: { errors } } = useForm();
+  const { currentUser } = useAuth();
+  const [courses, setCourses] = useState([]);
+  const [questions, setQuestions] = useState([
+    { text: '', options: ['', '', '', ''], correctAnswer: 0 }
+  ]);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(null);
-  
+  const [selectedCourse, setSelectedCourse] = useState('');
+
+  // Fetch courses taught by the teacher
+  useEffect(() => {
+    const fetchCourses = async () => {
+      if (!currentUser) return;
+      
+      try {
+        const coursesQuery = query(
+          collection(db, 'courses'),
+          where('teacherId', '==', currentUser.uid)
+        );
+        const coursesSnapshot = await getDocs(coursesQuery);
+        const coursesData = coursesSnapshot.docs.map(doc => ({
+          id: doc.id,
+          ...doc.data()
+        }));
+        
+        setCourses(coursesData);
+        
+        // Set the first course as selected by default
+        if (coursesData.length > 0) {
+          setSelectedCourse(coursesData[0].id);
+        }
+      } catch (error) {
+        console.error('Error fetching courses:', error);
+        toast.error('Failed to load courses');
+      }
+    };
+    
+    fetchCourses();
+  }, [currentUser]);
+
+  // Handle question changes
+  const handleQuestionChange = (index, field, value) => {
+    const updatedQuestions = [...questions];
+    
+    if (field === 'text') {
+      updatedQuestions[index].text = value;
+    } else if (field.startsWith('option')) {
+      const optionIndex = parseInt(field.replace('option', ''), 10);
+      updatedQuestions[index].options[optionIndex] = value;
+    } else if (field === 'correctAnswer') {
+      updatedQuestions[index].correctAnswer = parseInt(value, 10);
+    }
+    
+    setQuestions(updatedQuestions);
+  };
+
+  // Add a new question
   const addQuestion = () => {
-    setFormData({
-      ...formData,
-      questions: [
-        ...formData.questions,
-        {
-          questionText: '',
-          questionType: 'multiple_choice',
-          points: 1,
-          options: [
-            { optionText: '', isCorrect: false },
-            { optionText: '', isCorrect: false },
-            { optionText: '', isCorrect: false },
-            { optionText: '', isCorrect: false }
-          ]
-        }
-      ]
-    });
+    setQuestions([
+      ...questions,
+      { text: '', options: ['', '', '', ''], correctAnswer: 0 }
+    ]);
   };
-  
+
+  // Remove a question
   const removeQuestion = (index) => {
-    const newQuestions = [...formData.questions];
-    newQuestions.splice(index, 1);
-    setFormData({ ...formData, questions: newQuestions });
-  };
-  
-  const updateQuestion = (index, field, value) => {
-    const newQuestions = [...formData.questions];
-    newQuestions[index][field] = value;
-    setFormData({ ...formData, questions: newQuestions });
-  };
-  
-  const updateOption = (questionIndex, optionIndex, field, value) => {
-    const newQuestions = [...formData.questions];
-    newQuestions[questionIndex].options[optionIndex][field] = value;
-    
-    // If marking as correct, unmark others
-    if (field === 'isCorrect' && value === true) {
-      newQuestions[questionIndex].options.forEach((option, idx) => {
-        if (idx !== optionIndex) {
-          option.isCorrect = false;
-        }
-      });
-    }
-    
-    setFormData({ ...formData, questions: newQuestions });
-  };
-  
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    
-    if (!formData.title) {
-      setError('Quiz title is required');
+    if (questions.length <= 1) {
+      toast.error('At least one question is required');
       return;
     }
     
-    if (formData.questions.some(q => !q.questionText)) {
-      setError('All questions must have text');
+    const updatedQuestions = [...questions];
+    updatedQuestions.splice(index, 1);
+    setQuestions(updatedQuestions);
+  };
+
+  // Handle form submission
+  const onSubmit = async (data) => {
+    if (!selectedCourse) {
+      toast.error('Please select a course');
       return;
     }
     
-    if (formData.questions.some(q => 
-      !q.options.some(o => o.isCorrect) || 
-      q.options.some(o => !o.optionText)
-    )) {
-      setError('Each question must have all options filled and one correct answer');
+    // Validate that all questions have text and options
+    const invalidQuestions = questions.some(question => 
+      !question.text.trim() || 
+      question.options.some(option => !option.trim())
+    );
+    
+    if (invalidQuestions) {
+      toast.error('All questions and options must be filled out');
       return;
     }
+    
+    setLoading(true);
     
     try {
-      setLoading(true);
-      setError(null);
+      // Find the selected course
+      const selectedCourseData = courses.find(course => course.id === selectedCourse);
       
-      // Create quiz
-      const { data: quizData } = db.insert('quizzes', {
-        title: formData.title,
-        description: formData.description,
-        teacher_id: user.id,
-        time_limit: formData.timeLimit,
-        passing_score: formData.passingScore,
-        is_active: true,
-        question_count: formData.questions.length
-      });
+      // Create quiz document
+      const quizData = {
+        title: data.title,
+        description: data.description,
+        courseId: selectedCourse,
+        courseName: selectedCourseData?.name || 'Unknown Course',
+        teacherId: currentUser.uid,
+        questions: questions.map(question => ({
+          text: question.text,
+          options: question.options,
+          correctAnswer: question.correctAnswer
+        })),
+        createdAt: new Date().toISOString(),
+        dueDate: data.dueDate || null
+      };
       
-      // Create questions and options
-      for (const question of formData.questions) {
-        const { data: questionData } = db.insert('questions', {
-          quiz_id: quizData.id,
-          question_text: question.questionText,
-          question_type: question.questionType,
-          points: question.points
-        });
-        
-        // Create options for this question
-        question.options.forEach(option => {
-          db.insert('options', {
-            question_id: questionData.id,
-            option_text: option.optionText,
-            is_correct: option.isCorrect
-          });
-        });
-      }
+      await addDoc(collection(db, 'quizzes'), quizData);
       
-      // Success - redirect to dashboard
-      navigate('/teacher/dashboard');
+      toast.success('Quiz created successfully!');
       
+      // Reset form
+      reset();
+      setQuestions([{ text: '', options: ['', '', '', ''], correctAnswer: 0 }]);
     } catch (error) {
       console.error('Error creating quiz:', error);
-      setError(error.message);
+      toast.error('Failed to create quiz');
     } finally {
       setLoading(false);
     }
   };
-  
+
   return (
-    <Layout title="Create New Quiz" role="teacher">
-      <div className="bg-white rounded-lg shadow-sm p-6">
-        <form onSubmit={handleSubmit}>
-          {error && (
-            <div className="mb-4 p-3 bg-red-100 border border-red-300 text-red-700 rounded-lg">
-              {error}
-            </div>
-          )}
-          
-          {/* Quiz Details */}
-          <div className="mb-6">
-            <div className="mb-4">
-              <label htmlFor="title" className="block text-gray-700 mb-2">Quiz Title</label>
-              <input
-                type="text"
-                id="title"
-                value={formData.title}
-                onChange={(e) => setFormData({ ...formData, title: e.target.value })}
-                className="w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-green-600"
-                placeholder="Enter quiz title"
-              />
-            </div>
+    <DashboardLayout title="Create Quiz">
+      <div className="max-w-4xl mx-auto bg-white rounded-lg shadow-soft p-6 animate-fade-in">
+        <div className="flex items-center mb-6">
+          <FilePlus size={24} className="text-primary-600 mr-2" />
+          <h2 className="text-xl font-semibold text-gray-800">Create New Quiz</h2>
+        </div>
+        
+        <form onSubmit={handleSubmit(onSubmit)}>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+            <Input
+              label="Quiz Title"
+              placeholder="Introduction to Mathematics"
+              {...register('title', { required: 'Quiz title is required' })}
+              error={errors.title?.message}
+            />
             
             <div className="mb-4">
-              <label htmlFor="description" className="block text-gray-700 mb-2">Description</label>
-              <textarea
-                id="description"
-                value={formData.description}
-                onChange={(e) => setFormData({ ...formData, description: e.target.value })}
-                className="w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-green-600"
-                placeholder="Enter quiz description"
-                rows="3"
-              />
-            </div>
-            
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div>
-                <label htmlFor="timeLimit" className="block text-gray-700 mb-2">Time Limit (minutes)</label>
-                <input
-                  type="number"
-                  id="timeLimit"
-                  value={formData.timeLimit}
-                  onChange={(e) => setFormData({ ...formData, timeLimit: parseInt(e.target.value) })}
-                  className="w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-green-600"
-                  min="1"
-                />
-              </div>
-              
-              <div>
-                <label htmlFor="passingScore" className="block text-gray-700 mb-2">Passing Score (%)</label>
-                <input
-                  type="number"
-                  id="passingScore"
-                  value={formData.passingScore}
-                  onChange={(e) => setFormData({ ...formData, passingScore: parseInt(e.target.value) })}
-                  className="w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-green-600"
-                  min="0"
-                  max="100"
-                />
-              </div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Select Course
+              </label>
+              <select
+                className="w-full px-3 py-2 bg-white border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
+                value={selectedCourse}
+                onChange={(e) => setSelectedCourse(e.target.value)}
+              >
+                <option value="" disabled>Select a course</option>
+                {courses.map((course) => (
+                  <option key={course.id} value={course.id}>
+                    {course.name || 'Untitled Course'}
+                  </option>
+                ))}
+              </select>
+              {courses.length === 0 && (
+                <p className="mt-1 text-sm text-warning-600">
+                  No courses found. Please create a course first.
+                </p>
+              )}
             </div>
           </div>
           
-          {/* Questions */}
+          <div className="mb-6">
+            <Input
+              label="Quiz Description (Optional)"
+              placeholder="This quiz covers the basics of algebra and geometry"
+              {...register('description')}
+            />
+          </div>
+          
+          <div className="mb-6">
+            <Input
+              label="Due Date (Optional)"
+              type="date"
+              {...register('dueDate')}
+            />
+          </div>
+          
           <div className="mb-6">
             <div className="flex justify-between items-center mb-4">
-              <h2 className="text-lg font-semibold">Questions</h2>
-              <button
+              <h3 className="text-lg font-medium text-gray-700">Quiz Questions</h3>
+              <Button
                 type="button"
+                variant="outline"
                 onClick={addQuestion}
-                className="px-4 py-2 bg-[#6E8B55] text-white rounded-lg hover:bg-[#5A7648] transition-colors flex items-center"
+                className="flex items-center"
               >
-                <Plus size={18} className="mr-2" />
+                <Plus size={18} className="mr-1" />
                 Add Question
-              </button>
+              </Button>
             </div>
             
-            {formData.questions.map((question, questionIndex) => (
-              <div key={questionIndex} className="mb-6 p-4 border rounded-lg">
+            {questions.map((question, qIndex) => (
+              <div 
+                key={qIndex} 
+                className="bg-gray-50 rounded-lg p-4 mb-4 border border-gray-200"
+              >
                 <div className="flex justify-between items-start mb-4">
-                  <h3 className="font-medium">Question {questionIndex + 1}</h3>
+                  <h4 className="text-md font-medium text-gray-700">Question {qIndex + 1}</h4>
                   <button
                     type="button"
-                    onClick={() => removeQuestion(questionIndex)}
-                    className="text-red-600 hover:text-red-800"
-                    disabled={formData.questions.length === 1}
+                    onClick={() => removeQuestion(qIndex)}
+                    className="text-error-600 hover:text-error-800"
                   >
                     <Trash2 size={18} />
                   </button>
                 </div>
                 
                 <div className="mb-4">
-                  <label className="block text-gray-700 mb-2">Question Text</label>
-                  <textarea
-                    value={question.questionText}
-                    onChange={(e) => updateQuestion(questionIndex, 'questionText', e.target.value)}
-                    className="w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-green-600"
-                    placeholder="Enter question text"
-                    rows="2"
+                  <Input
+                    label="Question Text"
+                    placeholder="What is 2 + 2?"
+                    value={question.text}
+                    onChange={(e) => handleQuestionChange(qIndex, 'text', e.target.value)}
                   />
                 </div>
                 
                 <div className="mb-4">
-                  <label className="block text-gray-700 mb-2">Question Type</label>
-                  <select
-                    value={question.questionType}
-                    onChange={(e) => updateQuestion(questionIndex, 'questionType', e.target.value)}
-                    className="w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-green-600"
-                  >
-                    <option value="multiple_choice">Multiple Choice</option>
-                    <option value="true_false">True/False</option>
-                  </select>
-                </div>
-                
-                <div className="mb-4">
-                  <label className="block text-gray-700 mb-2">Points</label>
-                  <input
-                    type="number"
-                    value={question.points}
-                    onChange={(e) => updateQuestion(questionIndex, 'points', parseInt(e.target.value))}
-                    className="w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-green-600"
-                    min="1"
-                  />
-                </div>
-                
-                <div>
-                  <label className="block text-gray-700 mb-2">Options</label>
-                  <div className="space-y-2">
-                    {question.options.map((option, optionIndex) => (
-                      <div key={optionIndex} className="flex items-center gap-2">
-                        <input
-                          type="radio"
-                          name={`correct_${questionIndex}`}
-                          checked={option.isCorrect}
-                          onChange={() => updateOption(questionIndex, optionIndex, 'isCorrect', true)}
-                          className="w-4 h-4 text-green-600"
-                        />
-                        <input
-                          type="text"
-                          value={option.optionText}
-                          onChange={(e) => updateOption(questionIndex, optionIndex, 'optionText', e.target.value)}
-                          className="flex-1 px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-green-600"
-                          placeholder={`Option ${optionIndex + 1}`}
-                        />
-                      </div>
-                    ))}
-                  </div>
+                  <p className="block text-sm font-medium text-gray-700 mb-2">Answer Options</p>
+                  {question.options.map((option, oIndex) => (
+                    <div key={oIndex} className="flex items-center mb-2">
+                      <input
+                        type="radio"
+                        name={`question-${qIndex}-correct`}
+                        id={`question-${qIndex}-option-${oIndex}`}
+                        checked={question.correctAnswer === oIndex}
+                        onChange={() => handleQuestionChange(qIndex, 'correctAnswer', oIndex)}
+                        className="mr-2"
+                      />
+                      <Input
+                        placeholder={`Option ${oIndex + 1}`}
+                        value={option}
+                        onChange={(e) => handleQuestionChange(qIndex, `option${oIndex}`, e.target.value)}
+                        className="flex-1"
+                      />
+                    </div>
+                  ))}
                 </div>
               </div>
             ))}
           </div>
           
-          {/* Submit Button */}
           <div className="flex justify-end">
-            <button
+            <Button
               type="submit"
-              className="px-4 py-2 bg-[#6E8B55] text-white rounded-lg hover:bg-[#5A7648] transition-colors flex items-center"
-              disabled={loading}
+              variant="primary"
+              className="flex items-center"
+              disabled={loading || courses.length === 0}
             >
               {loading ? (
-                <>
-                  <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></span>
-                  Creating Quiz...
-                </>
+                <>Creating...</>
               ) : (
                 <>
                   <Save size={18} className="mr-2" />
                   Create Quiz
                 </>
               )}
-            </button>
+            </Button>
           </div>
         </form>
       </div>
-    </Layout>
+    </DashboardLayout>
   );
 };
 
