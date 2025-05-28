@@ -1,212 +1,273 @@
-import { useState, useEffect, useContext } from 'react';
+import React, { useState, useEffect } from 'react';
+import {
+  collection,
+  query,
+  where,
+  onSnapshot,
+} from 'firebase/firestore';
+import { db } from '../../firebase/config';
+import { useAuth } from '../../context/AuthContext';
+import DashboardLayout from '../../components/layout/DashboardLayout';
+import { BookOpen, FileQuestion, Users, Clock } from 'lucide-react';
 import { Link } from 'react-router-dom';
-import Layout from '../../components/Layout';
-import { AuthContext } from '../../App';
-import { db } from '../../utils/localStorageDB';
-import { FileQuestion, Users, BarChart2, Plus, BookOpen } from 'lucide-react';
+import {
+  Chart as ChartJS,
+  ArcElement,
+  Tooltip,
+  Legend,
+  CategoryScale,
+  LinearScale,
+  BarElement,
+  Title,
+} from 'chart.js';
+import { Bar } from 'react-chartjs-2';
+
+ChartJS.register(
+  ArcElement,
+  CategoryScale,
+  LinearScale,
+  BarElement,
+  Title,
+  Tooltip,
+  Legend
+);
+
+const StatCard = ({ title, value, icon, bgColor, linkTo }) => {
+  const Card = linkTo ? Link : 'div';
+  return (
+    <Card
+      to={linkTo}
+      className={`${bgColor} rounded-lg shadow-md p-6 flex items-center transition-transform duration-200 hover:scale-105`}
+    >
+      <div className="rounded-full bg-white bg-opacity-30 p-3 mr-4">{icon}</div>
+      <div>
+        <h3 className="text-white text-lg font-semibold">{title}</h3>
+        <p className="text-white text-2xl font-bold">{value}</p>
+      </div>
+    </Card>
+  );
+};
 
 const TeacherDashboard = () => {
-  const { user } = useContext(AuthContext);
-  const [loading, setLoading] = useState(true);
+  const { currentUser } = useAuth();
   const [stats, setStats] = useState({
-    totalQuizzes: 0,
-    activeQuizzes: 0,
-    totalStudents: 0,
-    averageScore: 0
+    courses: 0,
+    quizzes: 0,
+    students: 0,
+    pendingEnrollments: 0,
   });
-  
-  const [recentQuizzes, setRecentQuizzes] = useState([]);
-  
-  useEffect(() => {
-    const fetchDashboardData = async () => {
-      if (!user) return;
-      
-      try {
-        setLoading(true);
-        
-        // Fetch quizzes created by teacher
-        const quizzesData = db.filter('quizzes', { teacher_id: user.id });
-        
-        // Get recent quizzes
-        const sortedQuizzes = [...quizzesData].sort((a, b) => 
-          new Date(b.created_at) - new Date(a.created_at)
-        ).slice(0, 5);
-        
-        // Fetch total students
-        const studentsCount = db.get('profiles').filter(p => p.role === 'student').length;
-        
-        // Fetch quiz results for average score calculation
-        const quizIds = quizzesData.map(q => q.id);
-        const resultsData = db.get('quiz_results').filter(r => quizIds.includes(r.quiz_id));
-        
-        // Calculate average score
-        const totalScores = resultsData.reduce((sum, item) => sum + (item.score || 0), 0);
-        const avgScore = resultsData.length > 0 ? Math.round(totalScores / resultsData.length) : 0;
-        
-        // Set states
-        setRecentQuizzes(sortedQuizzes);
-        setStats({
-          totalQuizzes: quizzesData.length,
-          activeQuizzes: quizzesData.filter(q => q.is_active).length,
-          totalStudents: studentsCount,
-          averageScore: avgScore
-        });
-        
-      } catch (error) {
-        console.error('Error fetching dashboard data:', error);
-      } finally {
-        setLoading(false);
-      }
-    };
-    
-    fetchDashboardData();
-  }, [user]);
+  const [recentEnrollments, setRecentEnrollments] = useState([]);
+  const [quizResultsData, setQuizResultsData] = useState({
+    labels: [],
+    datasets: [{
+      label: 'Average Score (%)',
+      data: [],
+      backgroundColor: '#2563EB',
+    }],
+  });
+  const [loading, setLoading] = useState(true);
 
-  
-  if (loading) {
-    return (
-      <Layout title="Teacher Dashboard" role="teacher">
-        <div className="flex items-center justify-center p-12">
-          <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-green-700"></div>
-        </div>
-      </Layout>
+  useEffect(() => {
+    if (!currentUser) return;
+    setLoading(true);
+    const unsubscribeFns = [];
+
+    // Courses
+    const coursesQuery = query(
+      collection(db, 'courses'),
+      where('teacherId', '==', currentUser.uid)
     );
-  }
-  
+
+    const coursesUnsub = onSnapshot(coursesQuery, (courseSnap) => {
+      const courseIds = courseSnap.docs.map((doc) => doc.id);
+      setStats(prev => ({ ...prev, courses: courseSnap.size }));
+
+      // Quizzes
+      const quizzesQuery = query(
+        collection(db, 'quizzes'),
+        where('teacherId', '==', currentUser.uid)
+      );
+
+      const quizzesUnsub = onSnapshot(quizzesQuery, (quizSnap) => {
+        const quizzes = quizSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        setStats(prev => ({ ...prev, quizzes: quizSnap.size }));
+
+        const labels = quizzes.map(q => q.title || `Quiz ${q.id.slice(0, 5)}`);
+        const scores = quizzes.map(q => q.averageScore || 0); // Assuming averageScore exists
+
+        setQuizResultsData({
+          labels,
+          datasets: [{
+            label: 'Average Score (%)',
+            data: scores,
+            backgroundColor: '#2563EB',
+          }]
+        });
+      });
+
+      unsubscribeFns.push(quizzesUnsub);
+
+      // Enrollments
+      const enrollmentUnsubs = [];
+      for (let i = 0; i < courseIds.length; i += 10) {
+        const batch = courseIds.slice(i, i + 10);
+        const enrollmentQuery = query(
+          collection(db, 'enrollments'),
+          where('courseId', 'in', batch)
+        );
+
+        const enrollmentUnsub = onSnapshot(enrollmentQuery, (snap) => {
+          const enrollments = snap.docs.map(doc => ({
+            id: doc.id,
+            ...doc.data(),
+          }));
+
+          const approved = enrollments.filter(e => e.status === 'approved');
+          const pending = enrollments.filter(e => e.status === 'pending');
+
+          setStats(prev => ({
+            ...prev,
+            students: approved.length,
+            pendingEnrollments: pending.length,
+          }));
+
+          const sortedRecent = pending
+            .sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0))
+            .slice(0, 5);
+
+          setRecentEnrollments(sortedRecent);
+        });
+
+        enrollmentUnsubs.push(enrollmentUnsub);
+      }
+
+      unsubscribeFns.push(...enrollmentUnsubs);
+      setLoading(false);
+    });
+
+    unsubscribeFns.push(coursesUnsub);
+
+    return () => {
+      unsubscribeFns.forEach(unsub => unsub());
+    };
+  }, [currentUser]);
+
   return (
-    <Layout title="Teacher Dashboard" role="teacher">
-      {/* Stats Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-        <div className="bg-white p-4 rounded-lg shadow-sm flex items-center">
-          <div className="w-12 h-12 bg-blue-100 rounded-full flex items-center justify-center mr-4">
-            <FileQuestion size={24} className="text-blue-600" />
-          </div>
-          <div>
-            <p className="text-sm text-gray-500">Total Quizzes</p>
-            <p className="text-2xl font-semibold">{stats.totalQuizzes}</p>
-          </div>
-        </div>
-        
-        <div className="bg-white p-4 rounded-lg shadow-sm flex items-center">
-          <div className="w-12 h-12 bg-green-100 rounded-full flex items-center justify-center mr-4">
-            <FileQuestion size={24} className="text-green-600" />
-          </div>
-          <div>
-            <p className="text-sm text-gray-500">Active Quizzes</p>
-            <p className="text-2xl font-semibold">{stats.activeQuizzes}</p>
-          </div>
-        </div>
-        
-        <div className="bg-white p-4 rounded-lg shadow-sm flex items-center">
-          <div className="w-12 h-12 bg-purple-100 rounded-full flex items-center justify-center mr-4">
-            <Users size={24} className="text-purple-600" />
-          </div>
-          <div>
-            <p className="text-sm text-gray-500">Total Students</p>
-            <p className="text-2xl font-semibold">{stats.totalStudents}</p>
-          </div>
-        </div>
-        
-        <div className="bg-white p-4 rounded-lg shadow-sm flex items-center">
-          <div className="w-12 h-12 bg-yellow-100 rounded-full flex items-center justify-center mr-4">
-            <BarChart2 size={24} className="text-yellow-600" />
-          </div>
-          <div>
-            <p className="text-sm text-gray-500">Average Score</p>
-            <p className="text-2xl font-semibold">{stats.averageScore}%</p>
-          </div>
-        </div>
-      </div>
-      
-      {/* Create Quiz and Courses Buttons */}
-      <div className="mb-6 flex space-x-4">
-        <Link 
-          to="/teacher/create-quiz"
-          className="inline-flex items-center bg-[#6E8B55] text-white px-4 py-2 rounded-lg hover:bg-[#5A7648] transition-colors"
-        >
-          <Plus size={18} className="mr-2" />
-          Create New Quiz
-        </Link>
-        
-        <Link 
-          to="/teacher/courses"
-          className="inline-flex items-center bg-purple-600 text-white px-4 py-2 rounded-lg hover:bg-purple-700 transition-colors"
-        >
-          <BookOpen size={18} className="mr-2" />
-          Manage Courses
-        </Link>
-      </div>
-      
-      {/* Recent Quizzes */}
-      <div className="bg-white p-6 rounded-lg shadow-sm">
-        <div className="flex justify-between items-center mb-4">
-          <h2 className="text-lg font-semibold">Recent Quizzes</h2>
-          <Link to="/teacher/create-quiz" className="text-sm text-[#6E8B55] hover:underline">
-            Create New
-          </Link>
-        </div>
-        
-        {recentQuizzes.length > 0 ? (
-          <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-gray-200">
-              <thead>
-                <tr>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Title
-                  </th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Created
-                  </th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Status
-                  </th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Questions
-                  </th>
-                </tr>
-              </thead>
-              <tbody className="bg-white divide-y divide-gray-200">
-                {recentQuizzes.map((quiz) => (
-                  <tr key={quiz.id} className="hover:bg-gray-50">
-                    <td className="px-4 py-3 whitespace-nowrap">
-                      <div className="font-medium text-gray-900">{quiz.title}</div>
-                      <div className="text-sm text-gray-500">{quiz.description || 'No description'}</div>
-                    </td>
-                    <td className="px-4 py-3 whitespace-nowrap text-gray-500">
-                      {new Date(quiz.created_at).toLocaleDateString()}
-                    </td>
-                    <td className="px-4 py-3 whitespace-nowrap">
-                      <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${
-                        quiz.is_active 
-                          ? 'bg-green-100 text-green-800' 
-                          : 'bg-red-100 text-red-800'
-                      }`}>
-                        {quiz.is_active ? 'Active' : 'Inactive'}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 whitespace-nowrap text-gray-500">
-                      {quiz.question_count || '0'} Questions
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+    <DashboardLayout title="Teacher Dashboard">
+      <div className="animate-fade-in">
+        <h2 className="text-xl font-semibold text-gray-700 mb-6">Dashboard Overview</h2>
+
+        {loading ? (
+          <div className="flex justify-center items-center h-64">
+            <div className="h-8 w-8 border-4 border-primary-500 border-t-transparent rounded-full animate-spin"></div>
           </div>
         ) : (
-          <div className="text-center py-6">
-            <FileQuestion size={48} className="mx-auto text-gray-400 mb-2" />
-            <p className="text-gray-500 mb-4">You haven't created any quizzes yet</p>
-            <Link 
-              to="/teacher/create-quiz"
-              className="inline-flex items-center bg-[#6E8B55] text-white px-4 py-2 rounded-lg hover:bg-[#5A7648] transition-colors"
-            >
-              <Plus size={18} className="mr-2" />
-              Create Your First Quiz
-            </Link>
-          </div>
+          <>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+              <StatCard
+                title="Courses"
+                value={stats.courses}
+                icon={<BookOpen size={24} className="text-white" />}
+                bgColor="bg-primary-600"
+                linkTo="/teacher/course-details"
+              />
+              <StatCard
+                title="Quizzes"
+                value={stats.quizzes}
+                icon={<FileQuestion size={24} className="text-white" />}
+                bgColor="bg-blue-600"
+                linkTo="/teacher/create-quiz"
+              />
+              <StatCard
+                title="Students"
+                value={stats.students}
+                icon={<Users size={24} className="text-white" />}
+                bgColor="bg-green-600"
+              />
+              <StatCard
+                title="Pending Enrollments"
+                value={stats.pendingEnrollments}
+                icon={<Clock size={24} className="text-white" />}
+                bgColor="bg-yellow-600"
+                linkTo="/teacher/course-details"
+              />
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              <div className="bg-white p-6 rounded-lg shadow-md lg:col-span-2">
+                <h3 className="text-lg font-semibold text-gray-700 mb-4">Quiz Performance</h3>
+                <div className="h-64">
+                  {stats.quizzes > 0 ? (
+                    <Bar
+                      data={quizResultsData}
+                      options={{
+                        maintainAspectRatio: false,
+                        scales: {
+                          y: {
+                            beginAtZero: true,
+                            max: 100,
+                            title: {
+                              display: true,
+                              text: 'Average Score (%)',
+                            },
+                          },
+                        },
+                      }}
+                    />
+                  ) : (
+                    <div className="flex items-center justify-center h-full text-gray-500">
+                      No quiz data available yet.
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="bg-white p-6 rounded-lg shadow-md">
+                <h3 className="text-lg font-semibold text-gray-700 mb-4">
+                  Recent Enrollment Requests
+                </h3>
+                {stats.pendingEnrollments > 0 ? (
+                  <ul className="divide-y divide-gray-200">
+                    {recentEnrollments.map((enrollment) => (
+                      <li key={enrollment.id} className="py-3">
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <p className="text-sm font-medium text-gray-900">
+                              {enrollment.studentName || `Student ${enrollment.studentId?.slice(0, 5)}`}
+                            </p>
+                            <p className="text-sm text-gray-500">
+                              {enrollment.courseName || `Course ${enrollment.courseId?.slice(0, 5)}`}
+                            </p>
+                          </div>
+                          <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800">
+                            Pending
+                          </span>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <div className="py-4 text-center text-gray-500">
+                    No pending enrollment requests.
+                  </div>
+                )}
+
+                {stats.pendingEnrollments > 0 && (
+                  <div className="mt-4">
+                    <Link
+                      to="/teacher/course-details"
+                      className="text-primary-600 hover:text-primary-800 text-sm font-medium"
+                    >
+                      View all enrollment requests →
+                    </Link>
+                  </div>
+                )}
+              </div>
+            </div>
+          </>
         )}
       </div>
-    </Layout>
+    </DashboardLayout>
   );
 };
 
